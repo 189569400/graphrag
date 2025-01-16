@@ -3,10 +3,13 @@
 
 """Parameterization settings for the default configuration."""
 
+from pathlib import Path
+
 from devtools import pformat
-from pydantic import Field
+from pydantic import BaseModel, Field, model_validator
 
 import graphrag.config.defaults as defs
+from graphrag.config.errors import LanguageModelConfigMissingError
 from graphrag.config.models.basic_search_config import BasicSearchConfig
 from graphrag.config.models.cache_config import CacheConfig
 from graphrag.config.models.chunking_config import ChunkingConfig
@@ -18,7 +21,7 @@ from graphrag.config.models.embed_graph_config import EmbedGraphConfig
 from graphrag.config.models.entity_extraction_config import EntityExtractionConfig
 from graphrag.config.models.global_search_config import GlobalSearchConfig
 from graphrag.config.models.input_config import InputConfig
-from graphrag.config.models.llm_config import LLMConfig
+from graphrag.config.models.language_model_config import LanguageModelConfig
 from graphrag.config.models.local_search_config import LocalSearchConfig
 from graphrag.config.models.reporting_config import ReportingConfig
 from graphrag.config.models.snapshots_config import SnapshotsConfig
@@ -30,7 +33,7 @@ from graphrag.config.models.text_embedding_config import TextEmbeddingConfig
 from graphrag.config.models.umap_config import UmapConfig
 
 
-class GraphRagConfig(LLMConfig):
+class GraphRagConfig(BaseModel):
     """Base class for the Default-Configuration parameterization settings."""
 
     def __repr__(self) -> str:
@@ -42,8 +45,47 @@ class GraphRagConfig(LLMConfig):
         return self.model_dump_json(indent=4)
 
     root_dir: str = Field(
-        description="The root directory for the configuration.", default="."
+        description="The root directory for the configuration.", default=""
     )
+
+    def _validate_root_dir(self) -> None:
+        """Validate the root directory."""
+        if self.root_dir.strip() == "":
+            self.root_dir = str(Path.cwd().resolve())
+
+        if not Path(self.root_dir).is_dir():
+            msg = f"Invalid root directory: {self.root_dir} is not a directory."
+            raise FileNotFoundError(msg)
+
+    models: dict[str, LanguageModelConfig] = Field(
+        description="Available language model configurations.",
+        default={
+            defs.DEFAULT_CHAT_MODEL_ID: LanguageModelConfig.model_construct(
+                model=defs.LLM_MODEL, type=defs.LLM_TYPE
+            ),
+            defs.DEFAULT_EMBEDDING_MODEL_ID: LanguageModelConfig.model_construct(
+                model=defs.LLM_MODEL, type=defs.LLM_TYPE
+            ),
+        },
+    )
+
+    def _validate_models(self) -> None:
+        """Validate the models configuration.
+
+        Ensure both a default chat model and default embedding model
+        have been defined. Other models may also be defined but
+        defaults are required for the time being as places of the
+        code fallback to default model configs instead
+        of specifying a specific model.
+
+        TODO: Don't fallback to default models elsewhere in the code.
+        Forcing code to specify a model to use and allowing for any
+        names for model configurations.
+        """
+        if defs.DEFAULT_CHAT_MODEL_ID not in self.models:
+            raise LanguageModelConfigMissingError(defs.DEFAULT_CHAT_MODEL_ID)
+        if defs.DEFAULT_EMBEDDING_MODEL_ID not in self.models:
+            raise LanguageModelConfigMissingError(defs.DEFAULT_EMBEDDING_MODEL_ID)
 
     reporting: ReportingConfig = Field(
         description="The reporting configuration.", default=ReportingConfig()
@@ -152,12 +194,33 @@ class GraphRagConfig(LLMConfig):
     )
     """The basic search configuration."""
 
-    encoding_model: str = Field(
-        description="The encoding model to use.", default=defs.ENCODING_MODEL
-    )
-    """The encoding model to use."""
+    def get_language_model_config(self, model_id: str) -> LanguageModelConfig:
+        """Get a model configuration by ID.
 
-    skip_workflows: list[str] = Field(
-        description="The workflows to skip, usually for testing reasons.", default=[]
-    )
-    """The workflows to skip, usually for testing reasons."""
+        Parameters
+        ----------
+        model_id : str
+            The ID of the model to get. Should match an ID in the models list.
+
+        Returns
+        -------
+        LanguageModelConfig
+            The model configuration if found.
+
+        Raises
+        ------
+        ValueError
+            If the model ID is not found in the configuration.
+        """
+        if model_id not in self.models:
+            err_msg = f"Model ID {model_id} not found in configuration."
+            raise ValueError(err_msg)
+
+        return LanguageModelConfig.model_construct(**dict(self.models[model_id]))
+
+    @model_validator(mode="after")
+    def _validate_model(self):
+        """Validate the model configuration."""
+        self._validate_root_dir()
+        self._validate_models()
+        return self
